@@ -1130,6 +1130,81 @@ menu "Camera Configuration"
             comment "For 180° rotation, use HFlip + VFlip instead of this option"
         endchoice
     endif
+
+menu "Third-party AI Services"
+
+config XIAOZHI_ENABLE_THIRD_PARTY_AI
+    bool "Use third-party AI pipeline"
+    default n
+    help
+        Build the firmware with a local third-party ASR/LLM/TTS protocol instead of the
+        standard Xiaozhi WebSocket/MQTT protocol. Wake-up conversation becomes:
+        mic -> ASR -> text -> LLM -> text -> TTS -> audio -> playback.
+
+config XIAOZHI_THIRD_PARTY_ASR_API_KEY
+    string "ASR API key"
+    default ""
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_TTS_API_KEY
+    string "TTS API key"
+    default ""
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_LLM_API_KEY
+    string "LLM API key"
+    default ""
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_LLM_API_KEY_HEADER
+    string "LLM API key HTTP header"
+    default "x-bf-vk"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+    help
+        Header used to send the LLM API key. Set to "Authorization" for
+        providers that expect the standard OpenAI Bearer authentication.
+        A non-empty value sends this header with the configured API key value.
+
+config XIAOZHI_THIRD_PARTY_LLM_API_KEY_PREFIX
+    string "LLM API key value prefix"
+    default ""
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+    help
+        Optional prefix prepended to the LLM API key value. For example
+        "Bearer " when using the Authorization header.
+
+config XIAOZHI_THIRD_PARTY_ASR_MODEL
+    string "ASR model"
+    default "qwen3-asr-flash"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_TTS_MODEL
+    string "TTS model"
+    default "qwen-tts"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_TTS_VOICE
+    string "TTS voice"
+    default "Cherry"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_LLM_BASE_URL
+    string "LLM OpenAI-compatible base URL"
+    default "https://vibeg.seer-robotics.cn/openai/v1"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_LLM_MODEL
+    string "LLM model"
+    default "claude-fable-5-1"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+config XIAOZHI_THIRD_PARTY_DASHSCOPE_BASE_URL
+    string "DashScope API base URL"
+    default "https://maas.qianwenaiapi.com/api/v1"
+    depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
+
+endmenu
+
 endmenu
 
 menu "TAIJIPAI_S3_CONFIG"

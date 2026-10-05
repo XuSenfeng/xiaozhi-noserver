@@ -43,6 +43,9 @@ AudioService::~AudioService() {
     if (output_resampler_ != nullptr) {
         esp_ae_rate_cvt_close(output_resampler_);
     }
+    if (pcm_playback_resampler_ != nullptr) {
+        esp_ae_rate_cvt_close(pcm_playback_resampler_);
+    }
 }
 
 void AudioService::Initialize(AudioCodec* codec) {
@@ -604,6 +607,90 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
                      (unsigned long)dropped_total);
         }
     }
+}
+
+bool AudioService::EnsurePcmPlaybackResampler(int sample_rate) {
+    if (codec_ == nullptr) {
+        return false;
+    }
+    if (pcm_playback_resampler_ != nullptr && pcm_playback_sample_rate_ == sample_rate) {
+        return true;
+    }
+
+    if (pcm_playback_resampler_ != nullptr) {
+        esp_ae_rate_cvt_close(pcm_playback_resampler_);
+        pcm_playback_resampler_ = nullptr;
+    }
+    pcm_playback_sample_rate_ = 0;
+
+    if (sample_rate == codec_->output_sample_rate()) {
+        pcm_playback_sample_rate_ = sample_rate;
+        return true;
+    }
+
+    esp_ae_rate_cvt_cfg_t cfg = RATE_CVT_CFG(sample_rate, codec_->output_sample_rate(), ESP_AUDIO_MONO);
+    auto ret = esp_ae_rate_cvt_open(&cfg, &pcm_playback_resampler_);
+    if (pcm_playback_resampler_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create PCM playback resampler, error code: %d", ret);
+        return false;
+    }
+    pcm_playback_sample_rate_ = sample_rate;
+    return true;
+}
+
+bool AudioService::PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int sample_rate,
+                                          uint32_t playback_id, uint32_t media_position_ms,
+                                          bool wait) {
+    if (pcm.empty() || !EnsurePcmPlaybackResampler(sample_rate)) {
+        return false;
+    }
+
+    std::vector<int16_t> output_pcm;
+    if (pcm_playback_resampler_ != nullptr) {
+        uint32_t target_size = 0;
+        auto max_ret = esp_ae_rate_cvt_get_max_out_sample_num(pcm_playback_resampler_, pcm.size(),
+                                                              &target_size);
+        if (max_ret != ESP_AE_ERR_OK || target_size == 0) {
+            ESP_LOGE(TAG, "PCM playback resampler sizing failed, error code: %d", max_ret);
+            return false;
+        }
+        output_pcm.resize(target_size);
+        uint32_t actual_output = target_size;
+        auto ret = esp_ae_rate_cvt_process(pcm_playback_resampler_,
+                                           reinterpret_cast<esp_ae_sample_t>(const_cast<int16_t*>(pcm.data())),
+                                           pcm.size(),
+                                           reinterpret_cast<esp_ae_sample_t>(output_pcm.data()),
+                                           &actual_output);
+        if (ret != ESP_AE_ERR_OK) {
+            ESP_LOGE(TAG, "PCM playback resample failed, error code: %d", ret);
+            return false;
+        }
+        output_pcm.resize(actual_output);
+    } else {
+        output_pcm = pcm;
+    }
+
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    if (service_stopped_.load()) {
+        return false;
+    }
+    if (wait) {
+        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.full() || service_stopped_.load(); });
+    }
+    if (service_stopped_.load() || audio_playback_queue_.full()) {
+        return false;
+    }
+
+    AudioTask task;
+    task.type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task.pcm = std::move(output_pcm);
+    task.timestamp = 0;
+    task.playback_id = playback_id;
+    task.media_position_ms = media_position_ms;
+    audio_playback_queue_.push_back(std::move(task));
+    playback_drained_notified_ = false;
+    audio_queue_cv_.notify_all();
+    return true;
 }
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
