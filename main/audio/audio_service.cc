@@ -92,6 +92,7 @@ void AudioService::Initialize(AudioCodec* codec) {
     });
     audio_engine_->OnVadStateChange([this](bool speaking) {
         voice_detected_ = speaking;
+        ESP_LOGI(TAG, "AFE VAD changed: %s", speaking ? "speech" : "silence");
         if (callbacks_.on_vad_change) {
             callbacks_.on_vad_change(speaking);
         }
@@ -351,7 +352,7 @@ void AudioService::AudioOutputTask() {
             callbacks_.on_playback_progress(task.playback_id, task.media_position_ms);
         }
 
-        codec_->OutputData(task.pcm);
+        codec_->OutputData(task.pcm_psram);
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -412,7 +413,7 @@ void AudioService::OpusCodecTask() {
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             bool decoded = false;
             if (opus_decoder_ != nullptr) {
-                task.pcm.resize(decoder_frame_size_);
+                task.pcm_psram.resize(decoder_frame_size_);
                 esp_audio_dec_in_raw_t raw = {
                     .buffer = (uint8_t*)(packet->payload.data()),
                     .len = (uint32_t)(packet->payload.size()),
@@ -420,8 +421,8 @@ void AudioService::OpusCodecTask() {
                     .frame_recover = ESP_AUDIO_DEC_RECOVERY_NONE,
                 };
                 esp_audio_dec_out_frame_t out_frame = {
-                    .buffer = (uint8_t*)(task.pcm.data()),
-                    .len = (uint32_t)(task.pcm.size() * sizeof(int16_t)),
+                    .buffer = (uint8_t*)(task.pcm_psram.data()),
+                    .len = (uint32_t)(task.pcm_psram.size() * sizeof(int16_t)),
                     .decoded_size = 0,
                 };
                 esp_audio_dec_info_t dec_info = {};
@@ -429,19 +430,20 @@ void AudioService::OpusCodecTask() {
                 auto ret = esp_opus_dec_decode(opus_decoder_, &raw, &out_frame, &dec_info);
                 decoder_lock.unlock();
                 if (ret == ESP_AUDIO_ERR_OK) {
-                    task.pcm.resize(out_frame.decoded_size / sizeof(int16_t));
+                    task.pcm_psram.resize(out_frame.decoded_size / sizeof(int16_t));
                     if (decoder_sample_rate_ != codec_->output_sample_rate() &&
                         output_resampler_ != nullptr) {
                         uint32_t target_size = 0;
-                        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_, task.pcm.size(),
-                                                               &target_size);
-                        std::vector<int16_t> resampled(target_size);
+                        esp_ae_rate_cvt_get_max_out_sample_num(output_resampler_,
+                                                               task.pcm_psram.size(), &target_size);
+                        PsramVector<int16_t> resampled(target_size);
                         uint32_t actual_output = target_size;
-                        esp_ae_rate_cvt_process(output_resampler_, (esp_ae_sample_t)task.pcm.data(),
-                                                task.pcm.size(), (esp_ae_sample_t)resampled.data(),
-                                                &actual_output);
+                        esp_ae_rate_cvt_process(output_resampler_,
+                                                (esp_ae_sample_t)task.pcm_psram.data(),
+                                                task.pcm_psram.size(),
+                                                (esp_ae_sample_t)resampled.data(), &actual_output);
                         resampled.resize(actual_output);
-                        task.pcm = std::move(resampled);
+                        task.pcm_psram = std::move(resampled);
                     }
                     decoded = true;
                 } else {
@@ -628,7 +630,8 @@ bool AudioService::EnsurePcmPlaybackResampler(int sample_rate) {
         return true;
     }
 
-    esp_ae_rate_cvt_cfg_t cfg = RATE_CVT_CFG(sample_rate, codec_->output_sample_rate(), ESP_AUDIO_MONO);
+    esp_ae_rate_cvt_cfg_t cfg =
+        RATE_CVT_CFG(sample_rate, codec_->output_sample_rate(), ESP_AUDIO_MONO);
     auto ret = esp_ae_rate_cvt_open(&cfg, &pcm_playback_resampler_);
     if (pcm_playback_resampler_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create PCM playback resampler, error code: %d", ret);
@@ -638,14 +641,14 @@ bool AudioService::EnsurePcmPlaybackResampler(int sample_rate) {
     return true;
 }
 
-bool AudioService::PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int sample_rate,
+bool AudioService::PushPcmToPlaybackQueue(PsramVector<int16_t> pcm, int sample_rate,
                                           uint32_t playback_id, uint32_t media_position_ms,
                                           bool wait) {
     if (pcm.empty() || !EnsurePcmPlaybackResampler(sample_rate)) {
         return false;
     }
 
-    std::vector<int16_t> output_pcm;
+    PsramVector<int16_t> output_pcm;
     if (pcm_playback_resampler_ != nullptr) {
         uint32_t target_size = 0;
         auto max_ret = esp_ae_rate_cvt_get_max_out_sample_num(pcm_playback_resampler_, pcm.size(),
@@ -656,18 +659,17 @@ bool AudioService::PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int s
         }
         output_pcm.resize(target_size);
         uint32_t actual_output = target_size;
-        auto ret = esp_ae_rate_cvt_process(pcm_playback_resampler_,
-                                           reinterpret_cast<esp_ae_sample_t>(const_cast<int16_t*>(pcm.data())),
-                                           pcm.size(),
-                                           reinterpret_cast<esp_ae_sample_t>(output_pcm.data()),
-                                           &actual_output);
+        auto ret = esp_ae_rate_cvt_process(
+            pcm_playback_resampler_,
+            reinterpret_cast<esp_ae_sample_t>(const_cast<int16_t*>(pcm.data())), pcm.size(),
+            reinterpret_cast<esp_ae_sample_t>(output_pcm.data()), &actual_output);
         if (ret != ESP_AE_ERR_OK) {
             ESP_LOGE(TAG, "PCM playback resample failed, error code: %d", ret);
             return false;
         }
         output_pcm.resize(actual_output);
     } else {
-        output_pcm = pcm;
+        output_pcm = std::move(pcm);
     }
 
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
@@ -675,7 +677,8 @@ bool AudioService::PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int s
         return false;
     }
     if (wait) {
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.full() || service_stopped_.load(); });
+        audio_queue_cv_.wait(
+            lock, [this]() { return !audio_playback_queue_.full() || service_stopped_.load(); });
     }
     if (service_stopped_.load() || audio_playback_queue_.full()) {
         return false;
@@ -683,7 +686,7 @@ bool AudioService::PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int s
 
     AudioTask task;
     task.type = kAudioTaskTypeDecodeToPlaybackQueue;
-    task.pcm = std::move(output_pcm);
+    task.pcm_psram = std::move(output_pcm);
     task.timestamp = 0;
     task.playback_id = playback_id;
     task.media_position_ms = media_position_ms;
@@ -809,6 +812,10 @@ void AudioService::EnableVoiceProcessing(bool enable) {
             }
         }
         audio_engine_->EnableVoiceProcessing(true);
+        // A stale VAD=true from the previous utterance would make the third-party
+        // worker believe speech started immediately on the next listening window, then
+        // end ASR after trailing silence before the user actually speaks.
+        voice_detected_ = false;
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_PROCESSOR_RUNNING);
     } else {
         if (audio_engine_initialized_) {

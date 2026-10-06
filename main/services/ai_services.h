@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "psram_vector.h"
+
 class Http;
 class NetworkInterface;
 
@@ -33,7 +35,28 @@ struct SpeechRecognitionResult {
 class SpeechRecognizer {
 public:
     virtual ~SpeechRecognizer() = default;
-    virtual std::optional<SpeechRecognitionResult> Recognize(const std::vector<uint8_t>& wav_data) = 0;
+    virtual std::optional<SpeechRecognitionResult> Recognize(
+        const std::vector<uint8_t>& wav_data) = 0;
+};
+
+struct ToolDefinition {
+    std::string name;      // OpenAI function name, sanitized to supported characters.
+    std::string mcp_name;  // Original local MCP tool name; empty means same as name.
+    std::string description;
+    // OpenAI tools[].function.parameters object as JSON.
+    std::string parameters_json;
+};
+
+struct ToolCall {
+    std::string id;
+    std::string name;
+    // JSON object string passed in OpenAI `arguments`.
+    std::string arguments;
+};
+
+struct ChatResult {
+    std::optional<std::string> content;
+    std::vector<ToolCall> tool_calls;
 };
 
 class ChatModel {
@@ -41,17 +64,23 @@ public:
     struct Message {
         std::string role;
         std::string content;
+        // Assistant messages may include tool calls instead of/in addition to content.
+        std::vector<ToolCall> tool_calls;
+        // Tool-result messages use role=tool and include tool_call_id/tool_name.
+        std::string tool_call_id;
+        std::string tool_name;
     };
 
     virtual ~ChatModel() = default;
-    virtual std::optional<std::string> Chat(const std::vector<Message>& messages) = 0;
+    virtual std::optional<ChatResult> Chat(const std::vector<Message>& messages,
+                                           const std::vector<ToolDefinition>& tools) = 0;
 };
 
 struct SpeechSynthesisResult {
     bool ok = false;
     std::string error_message;
     // PCM samples, mono 16-bit data as returned by provider after conversion.
-    std::vector<int16_t> pcm;
+    PsramVector<int16_t> pcm;
     int sample_rate = 0;
 };
 

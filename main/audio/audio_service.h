@@ -23,6 +23,7 @@
 #include "audio_engine.h"
 #include "fixed_queue.h"
 #include "ogg_demuxer.h"
+#include "psram_vector.h"
 #include "protocol.h"
 
 /*
@@ -98,6 +99,7 @@ enum AudioTaskType {
 struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
+    PsramVector<int16_t> pcm_psram;
     uint32_t timestamp = 0;
     uint32_t playback_id = 0;
     uint32_t media_position_ms = 0;
@@ -142,7 +144,7 @@ public:
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
-    bool PushPcmToPlaybackQueue(const std::vector<int16_t>& pcm, int sample_rate,
+    bool PushPcmToPlaybackQueue(PsramVector<int16_t> pcm, int sample_rate,
                                 uint32_t playback_id = 0,
                                 uint32_t media_position_ms = 0, bool wait = true);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();

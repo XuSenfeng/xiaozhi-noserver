@@ -41,6 +41,7 @@ private:
     std::atomic<bool> channel_opened_{false};
     std::atomic<bool> abort_requested_{false};
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> restart_worker_on_exit_{false};
     TaskHandle_t worker_task_ = nullptr;
 
     ListeningMode listening_mode_ = kListeningModeAutoStop;

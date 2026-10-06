@@ -420,6 +420,17 @@ public:
     }
 };
 
+struct McpAiToolInfo {
+    std::string name;      // OpenAI-compatible sanitized tool name.
+    std::string mcp_name;  // Original MCP tool name used for local execution.
+    std::string description;
+    // OpenAI tools[].function.parameters object:
+    // {"type":"object","properties":{...},"required":[...]}
+    std::string parameters_json;
+    // MCP inputSchema kept intact for callers that need the same schema without OpenAI wrapping.
+    std::string input_schema_json;
+};
+
 class McpServer {
 public:
     using ResponseSender = std::function<void(const std::string&)>;
@@ -438,6 +449,12 @@ public:
     void ParseMessage(const cJSON* json, ResponseSender response_sender = nullptr);
     void ParseMessage(const std::string& message, ResponseSender response_sender = nullptr);
 
+    // Local AI bridge for third-party OpenAI-compatible tool calling.
+    // Excludes user-only tools, which are intentionally invisible to AI.
+    std::vector<McpAiToolInfo> GetAiTools() const;
+    std::expected<std::string, std::string> CallAiTool(const std::string& tool_name,
+                                                       const cJSON* tool_arguments);
+
 private:
     McpServer();
     ~McpServer();
@@ -454,6 +471,9 @@ private:
                       const ResponseSender& response_sender);
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
                     ResponseSender response_sender);
+
+    std::expected<PropertyList, std::string> BuildOverrideProperties(
+        const McpTool& tool, const cJSON* tool_arguments) const;
 
     std::vector<std::unique_ptr<McpTool>> tools_;
 };

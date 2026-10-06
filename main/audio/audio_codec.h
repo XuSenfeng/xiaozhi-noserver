@@ -11,6 +11,7 @@
 #include <functional>
 
 #include "board.h"
+#include "psram_vector.h"
 
 #define AUDIO_CODEC_DMA_DESC_NUM 6
 #define AUDIO_CODEC_DMA_FRAME_NUM 240
@@ -35,6 +36,7 @@ public:
     virtual void EnableOutput(bool enable);
 
     virtual void OutputData(std::vector<int16_t>& data);
+    virtual void OutputData(PsramVector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
 

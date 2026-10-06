@@ -68,7 +68,8 @@ height_(height)
     io_config.lcd_cmd_bits = 8;
     io_config.lcd_param_bits = 8;
     io_config.spi_mode = 0;
-    io_config.trans_queue_depth = 7;
+    io_config.trans_queue_depth = 1;
+    io_config.flags.psram_dma_direct = 1;
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)spi_host, &io_config, &io_handle));
     gpio_config_t gpio_conf = {};
     gpio_conf.intr_type     = GPIO_INTR_DISABLE;

@@ -1,11 +1,13 @@
 #include "ai_services.h"
 
 #include "board.h"
+#include "cjson_utils.h"
 #include "settings.h"
 
-#include <cJSON.h>
 #include <esp_log.h>
+#include <cJSON.h>
 #include <http.h>
+#include <mbedtls/base64.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -51,7 +53,6 @@
 #define CONFIG_XIAOZHI_THIRD_PARTY_DASHSCOPE_BASE_URL "https://maas.qianwenaiapi.com/api/v1"
 #endif
 
-
 namespace {
 
 std::string GetStringOrDefault(cJSON* root, const char* key, const char* default_value = "") {
@@ -81,7 +82,6 @@ std::string UrlEncode(const std::string& value) {
     return out;
 }
 
-
 std::optional<int> GetStatusCode(Http& http) {
     auto status = http.GetStatusCode();
     if (!status) {
@@ -91,11 +91,9 @@ std::optional<int> GetStatusCode(Http& http) {
     return *status;
 }
 
-std::optional<std::string> HttpRequest(NetworkInterface& network,
-                                       const std::string& method,
-                                       const std::string& url,
-                                       const std::vector<std::pair<std::string, std::string>>& headers,
-                                       const std::string& body = "") {
+std::optional<std::string> HttpRequest(
+    NetworkInterface& network, const std::string& method, const std::string& url,
+    const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body = "") {
     auto http = network.CreateHttp(0);
     if (!http) {
         ESP_LOGE(TAG, "CreateHttp failed");
@@ -112,13 +110,16 @@ std::optional<std::string> HttpRequest(NetworkInterface& network,
     auto opened = http->Open(method, url);
     if (!opened) {
         ESP_LOGE(TAG, "HTTP open failed: %s", opened.error().ToString().c_str());
+        http->Close();
         return std::nullopt;
     }
 
     auto status = GetStatusCode(*http);
     if (!status || *status < 200 || *status >= 300) {
+        std::string error_body = http->ReadAll();
         ESP_LOGE(TAG, "HTTP %s %s status=%d body=%s", method.c_str(), url.c_str(),
-                 status ? *status : -1, http->ReadAll().c_str());
+                 status ? *status : -1, error_body.c_str());
+        http->Close();
         return std::nullopt;
     }
 
@@ -127,11 +128,10 @@ std::optional<std::string> HttpRequest(NetworkInterface& network,
     return response;
 }
 
-std::optional<std::string> HttpPostJson(NetworkInterface& network,
-                                        const std::string& url,
-                                        const std::string& body,
-                                        const std::string& authorization = "",
-                                        const std::vector<std::pair<std::string, std::string>>& extra_headers = {}) {
+std::optional<std::string> HttpPostJson(
+    NetworkInterface& network, const std::string& url, const std::string& body,
+    const std::string& authorization = "",
+    const std::vector<std::pair<std::string, std::string>>& extra_headers = {}) {
     std::vector<std::pair<std::string, std::string>> headers = {
         {"Content-Type", "application/json"},
     };
@@ -144,8 +144,7 @@ std::optional<std::string> HttpPostJson(NetworkInterface& network,
     return HttpRequest(network, "POST", url, headers, body);
 }
 
-std::optional<std::string> HttpGet(NetworkInterface& network,
-                                   const std::string& url,
+std::optional<std::string> HttpGet(NetworkInterface& network, const std::string& url,
                                    const std::string& authorization = "") {
     std::vector<std::pair<std::string, std::string>> headers;
     if (!authorization.empty()) {
@@ -163,12 +162,14 @@ bool HttpDownload(NetworkInterface& network, const std::string& url, std::vector
     auto opened = http->Open("GET", url);
     if (!opened) {
         ESP_LOGE(TAG, "Download open failed: %s", opened.error().ToString().c_str());
+        http->Close();
         return false;
     }
 
     auto status = GetStatusCode(*http);
     if (!status || *status < 200 || *status >= 300) {
         ESP_LOGE(TAG, "Download status=%d", status ? *status : -1);
+        http->Close();
         return false;
     }
 
@@ -191,7 +192,7 @@ uint16_t ReadU16(const uint8_t* data) {
     return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8);
 }
 
-bool ParseWavPcm(const std::vector<uint8_t>& wav, std::vector<int16_t>& pcm, int& sample_rate) {
+bool ParseWavPcm(const std::vector<uint8_t>& wav, PsramVector<int16_t>& pcm, int& sample_rate) {
     if (wav.size() < 44) {
         return false;
     }
@@ -254,9 +255,10 @@ struct OssUploadPolicy {
 };
 
 std::optional<OssUploadPolicy> FetchOssPolicy(NetworkInterface& network,
-                                               const ThirdPartyAiConfig& config,
-                                               const std::string& model) {
-    std::string url = config.dashscope_base_url + "/uploads?action=getPolicy&model=" + UrlEncode(model);
+                                              const ThirdPartyAiConfig& config,
+                                              const std::string& model) {
+    std::string url =
+        config.dashscope_base_url + "/uploads?action=getPolicy&model=" + UrlEncode(model);
     std::string auth = "Bearer " + config.asr_api_key;
     auto response = HttpGet(network, url, auth);
     if (!response) {
@@ -290,10 +292,12 @@ std::optional<OssUploadPolicy> FetchOssPolicy(NetworkInterface& network,
         .signature = GetStringOrDefault(policy_json, "signature"),
         .policy = GetStringOrDefault(policy_json, "policy"),
         .x_oss_object_acl = GetStringOrDefault(policy_json, "x_oss_object_acl", "private"),
-        .x_oss_forbid_overwrite = GetStringOrDefault(policy_json, "x_oss_forbid_overwrite", "false"),
+        .x_oss_forbid_overwrite =
+            GetStringOrDefault(policy_json, "x_oss_forbid_overwrite", "false"),
     };
     ESP_LOGI(TAG,
-             "OSS policy parsed: host=%s dir=%s acl=%s forbid=%s key_id=%s signature_len=%d policy_len=%d",
+             "OSS policy parsed: host=%s dir=%s acl=%s forbid=%s key_id=%s signature_len=%d "
+             "policy_len=%d",
              policy.upload_host.c_str(), policy.upload_dir.c_str(), policy.x_oss_object_acl.c_str(),
              policy.x_oss_forbid_overwrite.c_str(), policy.oss_access_key_id.c_str(),
              static_cast<int>(policy.signature.size()), static_cast<int>(policy.policy.size()));
@@ -328,7 +332,8 @@ std::optional<std::string> UploadWavToOss(NetworkInterface& network,
     auto add_file = [&](const std::string& name, const std::string& file_name,
                         const std::string& content_type, const std::vector<uint8_t>& data) {
         body += "--" + boundary + "\r\n";
-        body += "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + file_name + "\"\r\n";
+        body += "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + file_name +
+                "\"\r\n";
         body += "Content-Type: " + content_type + "\r\n\r\n";
         body.append(reinterpret_cast<const char*>(data.data()), data.size());
         body += "\r\n";
@@ -394,7 +399,8 @@ public:
     QwenAsrService(ThirdPartyAiConfig config, NetworkInterface& network)
         : config_(std::move(config)), network_(network) {}
 
-    std::optional<SpeechRecognitionResult> Recognize(const std::vector<uint8_t>& wav_data) override {
+    std::optional<SpeechRecognitionResult> Recognize(
+        const std::vector<uint8_t>& wav_data) override {
         auto oss_url = UploadWavToOss(network_, config_, wav_data);
         if (!oss_url) {
             return std::nullopt;
@@ -431,9 +437,10 @@ public:
         cJSON_free(raw);
         cJSON_Delete(root);
 
-        std::string endpoint = config_.dashscope_base_url + "/services/aigc/multimodal-generation/generation";
+        std::string endpoint =
+            config_.dashscope_base_url + "/services/aigc/multimodal-generation/generation";
         auto response = HttpPostJson(network_, endpoint, body, "Bearer " + config_.asr_api_key,
-                                      {{"X-DashScope-OssResourceResolve", "enable"}});
+                                     {{"X-DashScope-OssResourceResolve", "enable"}});
         if (!response) {
             return std::nullopt;
         }
@@ -490,17 +497,68 @@ public:
     OpenAiCompatibleChatService(ThirdPartyAiConfig config, NetworkInterface& network)
         : config_(std::move(config)), network_(network) {}
 
-    std::optional<std::string> Chat(const std::vector<Message>& messages) override {
+    std::optional<ChatResult> Chat(const std::vector<Message>& messages,
+                                   const std::vector<ToolDefinition>& tools) override {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "model", config_.llm_model.c_str());
+
         cJSON* cjson_messages = cJSON_CreateArray();
         for (const auto& message : messages) {
             cJSON* item = cJSON_CreateObject();
             cJSON_AddStringToObject(item, "role", message.role.c_str());
-            cJSON_AddStringToObject(item, "content", message.content.c_str());
+
+            if (message.role == "tool") {
+                cJSON_AddStringToObject(item, "tool_call_id", message.tool_call_id.c_str());
+                if (!message.tool_name.empty()) {
+                    cJSON_AddStringToObject(item, "name", message.tool_name.c_str());
+                }
+                cJSON_AddStringToObject(item, "content", message.content.c_str());
+            } else if (!message.tool_calls.empty()) {
+                // Assistant tool-call turn. Most OpenAI-compatible providers accept null content.
+                cJSON_AddNullToObject(item, "content");
+                cJSON* tool_calls = cJSON_CreateArray();
+                for (const auto& tool_call : message.tool_calls) {
+                    cJSON* tool_call_item = cJSON_CreateObject();
+                    cJSON_AddStringToObject(tool_call_item, "id", tool_call.id.c_str());
+                    cJSON_AddStringToObject(tool_call_item, "type", "function");
+                    cJSON* function = cJSON_CreateObject();
+                    cJSON_AddStringToObject(function, "name", tool_call.name.c_str());
+                    cJSON_AddStringToObject(function, "arguments", tool_call.arguments.c_str());
+                    cJSON_AddItemToObject(tool_call_item, "function", function);
+                    cJSON_AddItemToArray(tool_calls, tool_call_item);
+                }
+                cJSON_AddItemToObject(item, "tool_calls", tool_calls);
+            } else {
+                cJSON_AddStringToObject(item, "content", message.content.c_str());
+            }
+
             cJSON_AddItemToArray(cjson_messages, item);
         }
         cJSON_AddItemToObject(root, "messages", cjson_messages);
+
+        if (!tools.empty()) {
+            cJSON* cjson_tools = cJSON_CreateArray();
+            for (const auto& tool : tools) {
+                cJSON* tool_item = cJSON_CreateObject();
+                cJSON_AddStringToObject(tool_item, "type", "function");
+                cJSON* function = cJSON_CreateObject();
+                cJSON_AddStringToObject(function, "name", tool.name.c_str());
+                cJSON_AddStringToObject(function, "description", tool.description.c_str());
+
+                CJsonUniquePtr parameters(cJSON_Parse(tool.parameters_json.c_str()));
+                if (parameters == nullptr) {
+                    cJSON_Delete(root);
+                    return std::nullopt;
+                }
+                cJSON_AddItemToObject(function, "parameters", parameters.get());
+                parameters.release();
+
+                cJSON_AddItemToObject(tool_item, "function", function);
+                cJSON_AddItemToArray(cjson_tools, tool_item);
+            }
+            cJSON_AddItemToObject(root, "tools", cjson_tools);
+        }
+
         char* raw = cJSON_PrintUnformatted(root);
         std::string body = raw ? raw : "";
         cJSON_free(raw);
@@ -516,9 +574,9 @@ public:
         if (config_.llm_api_key_header.empty()) {
             response = HttpPostJson(network_, endpoint, body, "Bearer " + config_.llm_api_key);
         } else {
-            response = HttpPostJson(network_, endpoint, body, "",
-                                    {{config_.llm_api_key_header,
-                                      config_.llm_api_key_prefix + config_.llm_api_key}});
+            response = HttpPostJson(
+                network_, endpoint, body, "",
+                {{config_.llm_api_key_header, config_.llm_api_key_prefix + config_.llm_api_key}});
         }
         if (!response) {
             return std::nullopt;
@@ -528,7 +586,8 @@ public:
         if (response_root == nullptr) {
             return std::nullopt;
         }
-        std::optional<std::string> text;
+
+        ChatResult result;
         cJSON* choices = cJSON_GetObjectItem(response_root, "choices");
         if (cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0 &&
             cJSON_IsObject(cJSON_GetArrayItem(choices, 0))) {
@@ -536,16 +595,44 @@ public:
             cJSON* message = cJSON_GetObjectItem(choice, "message");
             if (cJSON_IsObject(message)) {
                 auto content = cJSON_GetObjectItem(message, "content");
-                if (cJSON_IsString(content)) {
-                    text = content->valuestring;
+                if (cJSON_IsString(content) && content->valuestring != nullptr) {
+                    result.content = content->valuestring;
+                }
+
+                cJSON* tool_calls = cJSON_GetObjectItem(message, "tool_calls");
+                if (cJSON_IsArray(tool_calls)) {
+                    int count = cJSON_GetArraySize(tool_calls);
+                    for (int i = 0; i < count; ++i) {
+                        cJSON* tool_call = cJSON_GetArrayItem(tool_calls, i);
+                        if (!cJSON_IsObject(tool_call)) {
+                            continue;
+                        }
+                        ToolCall call;
+                        call.id = GetStringOrDefault(tool_call, "id");
+                        cJSON* function = cJSON_GetObjectItem(tool_call, "function");
+                        if (cJSON_IsObject(function)) {
+                            call.name = GetStringOrDefault(function, "name");
+                            call.arguments = GetStringOrDefault(function, "arguments", "{}");
+                        } else {
+                            call.name = GetStringOrDefault(tool_call, "name");
+                        }
+                        result.tool_calls.push_back(std::move(call));
+                    }
                 }
             }
         }
         cJSON_Delete(response_root);
-        if (!text || text->empty()) {
-            ESP_LOGE(TAG, "Chat model returned no text: %s", response->c_str());
+
+        if (result.tool_calls.empty() && (!result.content || result.content->empty())) {
+            ESP_LOGE(TAG, "Chat model returned no text or tool calls: %s", response->c_str());
+            return std::nullopt;
         }
-        return text;
+
+        if (!result.tool_calls.empty()) {
+            ESP_LOGI(TAG, "LLM requested %d tool call(s)",
+                     static_cast<int>(result.tool_calls.size()));
+        }
+        return result;
     }
 
 private:
@@ -553,27 +640,241 @@ private:
     NetworkInterface& network_;
 };
 
+
+std::optional<std::vector<uint8_t>> DecodeBase64(const std::string& encoded) {
+    if (encoded.empty()) {
+        return std::vector<uint8_t>{};
+    }
+
+    size_t decoded_capacity = ((encoded.size() + 3) / 4) * 3 + 4;
+    std::vector<uint8_t> decoded(decoded_capacity);
+    size_t decoded_size = 0;
+    int rc = mbedtls_base64_decode(decoded.data(), decoded.size(), &decoded_size,
+                                   reinterpret_cast<const unsigned char*>(encoded.data()),
+                                   encoded.size());
+    if (rc != 0) {
+        return std::nullopt;
+    }
+    decoded.resize(decoded_size);
+    return decoded;
+}
+
+std::string BuildQwenTtsBody(const std::string& model, const std::string& voice,
+                             const std::string& text) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "model", model.c_str());
+    cJSON* input = cJSON_CreateObject();
+    cJSON_AddStringToObject(input, "text", text.c_str());
+    cJSON_AddStringToObject(input, "voice", voice.c_str());
+    cJSON_AddItemToObject(root, "input", input);
+    cJSON* parameters = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "parameters", parameters);
+
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string body = raw ? raw : "";
+    cJSON_free(raw);
+    cJSON_Delete(root);
+    return body;
+}
+
+void AppendPcmBytes(PsramVector<int16_t>& pcm, const std::vector<uint8_t>& bytes) {
+    if (bytes.size() < sizeof(int16_t)) {
+        return;
+    }
+
+    size_t sample_count = bytes.size() / sizeof(int16_t);
+    size_t old_size = pcm.size();
+    pcm.resize(old_size + sample_count);
+    memcpy(pcm.data() + old_size, bytes.data(), sample_count * sizeof(int16_t));
+}
+
+void ProcessTtsSseEvent(const std::string& event, PsramVector<int16_t>& pcm, bool& stopped) {
+    std::string data;
+    size_t line_start = 0;
+    while (line_start <= event.size()) {
+        size_t line_end = event.find('\n', line_start);
+        if (line_end == std::string::npos) {
+            line_end = event.size();
+        }
+
+        std::string line = event.substr(line_start, line_end - line_start);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.rfind("data:", 0) == 0) {
+            std::string value = line.substr(5);
+            if (!value.empty() && value.front() == ' ') {
+                value.erase(value.begin());
+            }
+            data += value;
+        } else if (!line.empty() && line[0] != ':') {
+            // Other SSE fields, e.g. event/result and id. They are informational for this
+            // DashScope-compatible response.
+        }
+
+        if (line_end == event.size()) {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+
+    if (data.empty()) {
+        return;
+    }
+
+    cJSON* root = cJSON_Parse(data.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Ignoring invalid TTS SSE data: %s", data.c_str());
+        return;
+    }
+
+    cJSON* output = cJSON_GetObjectItem(root, "output");
+    if (cJSON_IsObject(output)) {
+        cJSON* audio = cJSON_GetObjectItem(output, "audio");
+        if (cJSON_IsObject(audio)) {
+            cJSON* audio_data = cJSON_GetObjectItem(audio, "data");
+            if (cJSON_IsString(audio_data) && audio_data->valuestring != nullptr &&
+                audio_data->valuestring[0] != '\0') {
+                auto decoded = DecodeBase64(audio_data->valuestring);
+                if (decoded) {
+                    AppendPcmBytes(pcm, *decoded);
+                } else {
+                    ESP_LOGW(TAG, "Failed to decode TTS SSE audio chunk");
+                }
+            }
+
+            cJSON* finish_reason = cJSON_GetObjectItem(output, "finish_reason");
+            if (cJSON_IsString(finish_reason) && finish_reason->valuestring != nullptr &&
+                strcmp(finish_reason->valuestring, "stop") == 0) {
+                stopped = true;
+            }
+        }
+    }
+    cJSON_Delete(root);
+}
+
+void ConsumeTtsSseLines(std::string& buffer, std::string& event, PsramVector<int16_t>& pcm,
+                        bool& stopped) {
+    while (!buffer.empty()) {
+        size_t newline = buffer.find('\n');
+        if (newline == std::string::npos) {
+            break;
+        }
+
+        std::string line = buffer.substr(0, newline);
+        buffer.erase(0, newline + 1);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.empty()) {
+            ProcessTtsSseEvent(event, pcm, stopped);
+            event.clear();
+        } else {
+            event += line;
+            event += '\n';
+        }
+    }
+}
+
 class QwenTtsService : public SpeechSynthesizer {
 public:
     QwenTtsService(ThirdPartyAiConfig config, NetworkInterface& network)
         : config_(std::move(config)), network_(network) {}
 
     std::optional<SpeechSynthesisResult> Synthesize(const std::string& text) override {
-        cJSON* root = cJSON_CreateObject();
-        cJSON_AddStringToObject(root, "model", config_.tts_model.c_str());
-        cJSON* input = cJSON_CreateObject();
-        cJSON_AddStringToObject(input, "text", text.c_str());
-        cJSON_AddStringToObject(input, "voice", config_.tts_voice.c_str());
-        cJSON_AddItemToObject(root, "input", input);
-        cJSON* parameters = cJSON_CreateObject();
-        cJSON_AddItemToObject(root, "parameters", parameters);
+        auto streamed = SynthesizeStreaming(text);
+        if (streamed && streamed->ok) {
+            return streamed;
+        }
 
-        char* raw = cJSON_PrintUnformatted(root);
-        std::string body = raw ? raw : "";
-        cJSON_free(raw);
-        cJSON_Delete(root);
+        return SynthesizeLegacy(text);
+    }
 
-        std::string endpoint = config_.dashscope_base_url + "/services/aigc/multimodal-generation/generation";
+private:
+    std::optional<SpeechSynthesisResult> SynthesizeStreaming(const std::string& text) {
+        std::string endpoint =
+            config_.dashscope_base_url + "/services/aigc/multimodal-generation/generation";
+        std::string body = BuildQwenTtsBody(config_.tts_model, config_.tts_voice, text);
+
+        auto http = network_.CreateHttp(0);
+        if (!http) {
+            ESP_LOGE(TAG, "CreateHttp failed for streaming TTS");
+            return std::nullopt;
+        }
+
+        http->SetHeader("Authorization", "Bearer " + config_.tts_api_key);
+        http->SetHeader("Content-Type", "application/json");
+        http->SetHeader("X-DashScope-SSE", "enable");
+        http->SetContent(std::string(body));
+
+        auto opened = http->Open("POST", endpoint);
+        if (!opened) {
+            ESP_LOGE(TAG, "Streaming TTS open failed: %s", opened.error().ToString().c_str());
+            http->Close();
+            return std::nullopt;
+        }
+
+        auto status = GetStatusCode(*http);
+        if (!status || *status < 200 || *status >= 300) {
+            std::string error_body = http->ReadAll();
+            ESP_LOGE(TAG, "Streaming TTS status=%d body=%s", status ? *status : -1,
+                     error_body.c_str());
+            http->Close();
+            return std::nullopt;
+        }
+
+        PsramVector<int16_t> pcm;
+        std::string buffer;
+        std::string event;
+        bool stopped = false;
+        char read_buffer[2048];
+
+        while (true) {
+            auto read_result = http->Read(read_buffer, sizeof(read_buffer));
+            if (!read_result) {
+                ESP_LOGE(TAG, "Streaming TTS read failed: %s",
+                         read_result.error().ToString().c_str());
+                break;
+            }
+            if (*read_result <= 0) {
+                break;
+            }
+
+            buffer.append(read_buffer, static_cast<size_t>(*read_result));
+            ConsumeTtsSseLines(buffer, event, pcm, stopped);
+            if (stopped) {
+                break;
+            }
+        }
+
+        if (!event.empty()) {
+            ProcessTtsSseEvent(event, pcm, stopped);
+        }
+
+        http->Close();
+
+        if (pcm.empty()) {
+            ESP_LOGE(TAG, "Streaming TTS returned no audio data");
+            return std::nullopt;
+        }
+
+        SpeechSynthesisResult result;
+        result.pcm = std::move(pcm);
+        result.sample_rate = 24000;
+        result.ok = !result.pcm.empty();
+
+        ESP_LOGI(TAG, "Streaming TTS decoded %d bytes of 16-bit PCM",
+                 static_cast<int>(result.pcm.size() * sizeof(int16_t)));
+        return result;
+    }
+
+    std::optional<SpeechSynthesisResult> SynthesizeLegacy(const std::string& text) {
+        std::string endpoint =
+            config_.dashscope_base_url + "/services/aigc/multimodal-generation/generation";
+        std::string body = BuildQwenTtsBody(config_.tts_model, config_.tts_voice, text);
+
         auto response = HttpPostJson(network_, endpoint, body, "Bearer " + config_.tts_api_key);
         if (!response) {
             return std::nullopt;
@@ -583,6 +884,7 @@ public:
         if (response_root == nullptr) {
             return std::nullopt;
         }
+
         std::string audio_url;
         cJSON* output = cJSON_GetObjectItem(response_root, "output");
         if (cJSON_IsObject(output)) {
@@ -598,6 +900,11 @@ public:
             return std::nullopt;
         }
 
+        // Release the often-large TTS JSON response before downloading the WAV file.
+        // Keeping it alive while HttpDownload reads into another buffer pushes the ESP32-S3
+        // heap into tight/OOM territory for long replies.
+        response.reset();
+
         std::vector<uint8_t> wav;
         if (!HttpDownload(network_, audio_url, wav)) {
             return std::nullopt;
@@ -605,17 +912,16 @@ public:
 
         SpeechSynthesisResult result;
         result.ok = ParseWavPcm(wav, result.pcm, result.sample_rate);
+        std::vector<uint8_t>().swap(wav);
         if (!result.ok) {
             result.error_message = "Failed to parse TTS WAV data";
         }
         return result;
     }
 
-private:
     ThirdPartyAiConfig config_;
     NetworkInterface& network_;
 };
-
 }  // namespace
 
 ThirdPartyAiConfig LoadThirdPartyAiConfig() {
@@ -632,7 +938,8 @@ ThirdPartyAiConfig LoadThirdPartyAiConfig() {
     config.asr_model = settings.GetString("asr_model", CONFIG_XIAOZHI_THIRD_PARTY_ASR_MODEL);
     config.tts_model = settings.GetString("tts_model", CONFIG_XIAOZHI_THIRD_PARTY_TTS_MODEL);
     config.tts_voice = settings.GetString("tts_voice", CONFIG_XIAOZHI_THIRD_PARTY_TTS_VOICE);
-    config.llm_base_url = settings.GetString("llm_base_url", CONFIG_XIAOZHI_THIRD_PARTY_LLM_BASE_URL);
+    config.llm_base_url =
+        settings.GetString("llm_base_url", CONFIG_XIAOZHI_THIRD_PARTY_LLM_BASE_URL);
     config.llm_model = settings.GetString("llm_model", CONFIG_XIAOZHI_THIRD_PARTY_LLM_MODEL);
     config.dashscope_base_url =
         settings.GetString("dashscope_base_url", CONFIG_XIAOZHI_THIRD_PARTY_DASHSCOPE_BASE_URL);

@@ -8,7 +8,9 @@
 #include <esp_log.h>
 #include <esp_pthread.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <iterator>
 #include <optional>
 
@@ -20,6 +22,24 @@
 #include "settings.h"
 
 #define TAG "MCP"
+
+namespace {
+
+std::string SanitizeOpenAiToolName(const std::string& name) {
+    std::string sanitized;
+    sanitized.reserve(name.size());
+    for (char c : name) {
+        bool allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                       c == '_' || c == '-';
+        sanitized.push_back(allowed ? c : '_');
+    }
+    if (sanitized.empty()) {
+        return "tool";
+    }
+    return sanitized;
+}
+
+}  // namespace
 
 McpServer::McpServer() {}
 
@@ -351,6 +371,89 @@ void McpServer::AddUserOnlyTool(const std::string& name, const std::string& desc
     AddTool(std::move(tool));
 }
 
+std::vector<McpAiToolInfo> McpServer::GetAiTools() const {
+    std::vector<McpAiToolInfo> infos;
+    infos.reserve(tools_.size());
+
+    for (const auto& tool : tools_) {
+        if (tool->user_only()) {
+            continue;
+        }
+
+        CJsonUniquePtr input_schema(cJSON_CreateObject());
+        cJSON_AddStringToObject(input_schema.get(), "type", "object");
+
+        CJsonUniquePtr properties(cJSON_Parse(tool->properties().to_json().c_str()));
+        if (properties != nullptr) {
+            cJSON_AddItemToObject(input_schema.get(), "properties", properties.get());
+            properties.release();
+        }
+
+        auto required = tool->properties().GetRequired();
+        if (!required.empty()) {
+            CJsonUniquePtr required_array(cJSON_CreateArray());
+            for (const auto& property : required) {
+                CJsonUniquePtr item(cJSON_CreateString(property.c_str()));
+                if (item != nullptr) {
+                    cJSON_AddItemToArray(required_array.get(), item.get());
+                    item.release();
+                }
+            }
+            cJSON_AddItemToObject(input_schema.get(), "required", required_array.get());
+            required_array.release();
+        }
+
+        CJsonStringUniquePtr input_schema_str(cJSON_PrintUnformatted(input_schema.get()));
+        CJsonStringUniquePtr parameters_str(cJSON_PrintUnformatted(input_schema.get()));
+        if (input_schema_str == nullptr || parameters_str == nullptr) {
+            continue;
+        }
+
+        infos.push_back({
+            .name = SanitizeOpenAiToolName(tool->name()),
+            .mcp_name = tool->name(),
+            .description = tool->description(),
+            .parameters_json = parameters_str.get(),
+            .input_schema_json = input_schema_str.get(),
+        });
+    }
+    return infos;
+}
+
+std::expected<std::string, std::string> McpServer::CallAiTool(const std::string& tool_name,
+                                                              const cJSON* tool_arguments) {
+    auto tool_iter = std::find_if(tools_.begin(), tools_.end(), [&tool_name](const auto& tool) {
+        return tool->name() == tool_name;
+    });
+    if (tool_iter == tools_.end()) {
+        return std::unexpected("Unknown tool: " + tool_name);
+    }
+
+    McpTool* tool = tool_iter->get();
+    auto properties = BuildOverrideProperties(*tool, tool_arguments);
+    if (!properties) {
+        return std::unexpected(std::move(properties.error()));
+    }
+
+    // Existing MCP tools are expected to run on the Application main task.
+    auto& app = Application::GetInstance();
+    auto promise = std::make_shared<std::promise<std::expected<std::string, std::string>>>();
+    auto future = promise->get_future();
+    app.Schedule([tool, properties = std::move(*properties), promise]() {
+        auto result = tool->Call(properties);
+        if (!result) {
+            promise->set_value(std::unexpected(std::move(result.error())));
+        } else {
+            promise->set_value(std::move(*result));
+        }
+    });
+
+    if (future.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+        return std::unexpected("AI tool timeout waiting for main task");
+    }
+    return future.get();
+}
+
 void McpServer::ParseMessage(const std::string& message, ResponseSender response_sender) {
     CJsonUniquePtr json(cJSON_Parse(message.c_str()));
     if (json == nullptr) {
@@ -561,20 +664,9 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     ReplyResult(id, json, response_sender);
 }
 
-void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
-                           ResponseSender response_sender) {
-    auto tool_iter = std::find_if(tools_.begin(), tools_.end(), [&tool_name](const auto& tool) {
-        return tool->name() == tool_name;
-    });
-
-    if (tool_iter == tools_.end()) {
-        ESP_LOGE(TAG, "tools/call: Unknown tool: %s", tool_name.c_str());
-        ReplyError(id, -32602, "Unknown tool: " + tool_name, response_sender);
-        return;
-    }
-
-    McpTool* tool = tool_iter->get();
-    PropertyList arguments = tool->properties();
+std::expected<PropertyList, std::string> McpServer::BuildOverrideProperties(
+    const McpTool& tool, const cJSON* tool_arguments) const {
+    PropertyList arguments = tool.properties();
     for (auto& argument : arguments) {
         bool found = false;
         std::expected<void, std::string> validation;
@@ -590,30 +682,44 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                 validation = argument.set_value<std::string>(value->valuestring);
                 found = true;
             } else if (value != nullptr) {
-                ESP_LOGE(TAG, "tools/call: Invalid type for argument: %s", argument.name().c_str());
-                ReplyError(id, -32602, "Invalid type for argument: " + argument.name(),
-                           response_sender);
-                return;
+                return std::unexpected("Invalid type for argument: " + argument.name());
             }
         }
 
         if (found && !validation) {
-            ESP_LOGE(TAG, "tools/call: %s", validation.error().c_str());
-            ReplyError(id, -32602, validation.error(), response_sender);
-            return;
+            return std::unexpected(validation.error());
         }
 
         if (!argument.has_default_value() && !found) {
-            ESP_LOGE(TAG, "tools/call: Missing required argument: %s", argument.name().c_str());
-            ReplyError(id, -32602, "Missing required argument: " + argument.name(),
-                       response_sender);
-            return;
+            return std::unexpected("Missing required argument: " + argument.name());
         }
+    }
+    return arguments;
+}
+
+void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments,
+                           ResponseSender response_sender) {
+    auto tool_iter = std::find_if(tools_.begin(), tools_.end(), [&tool_name](const auto& tool) {
+        return tool->name() == tool_name;
+    });
+
+    if (tool_iter == tools_.end()) {
+        ESP_LOGE(TAG, "tools/call: Unknown tool: %s", tool_name.c_str());
+        ReplyError(id, -32602, "Unknown tool: " + tool_name, response_sender);
+        return;
+    }
+
+    McpTool* tool = tool_iter->get();
+    auto properties = BuildOverrideProperties(*tool, tool_arguments);
+    if (!properties) {
+        ESP_LOGE(TAG, "tools/call: %s", properties.error().c_str());
+        ReplyError(id, -32602, properties.error(), response_sender);
+        return;
     }
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool, arguments = std::move(arguments),
+    app.Schedule([this, id, tool, arguments = std::move(*properties),
                   response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
         if (!result) {

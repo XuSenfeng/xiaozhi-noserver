@@ -10,8 +10,8 @@
 #include "settings.h"
 #include "system_info.h"
 #include "text_glyph_payload.h"
-#include "websocket_protocol.h"
 #include "third_party_protocol.h"
+#include "websocket_protocol.h"
 
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -713,10 +713,9 @@ void Application::InitializeProtocol() {
             if (cJSON_IsObject(payload)) {
                 CJsonStringUniquePtr payload_json(cJSON_PrintUnformatted(payload));
                 if (payload_json) {
-                    Schedule(
-                        [this, display, payload_str = std::string(payload_json.get())]() {
-                            display->SetChatMessage("system", payload_str.c_str());
-                        });
+                    Schedule([this, display, payload_str = std::string(payload_json.get())]() {
+                        display->SetChatMessage("system", payload_str.c_str());
+                    });
                 }
             } else {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
@@ -1033,8 +1032,17 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
-            // Make sure the audio processor is running
-            if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
+            ESP_LOGI(TAG,
+                     "Listening state entered: play_popup=%d processor_running=%d playback_idle=%d "
+                     "pending=%d mode=%d",
+                     play_popup_on_listening_, audio_service_.IsAudioProcessorRunning(),
+                     audio_service_.IsPlaybackIdle(), pending_listening_start_, listening_mode_);
+
+            // Realtime mode keeps the audio processor running during TTS, so it can look
+            // like no restart is needed here. The third-party worker still completed
+            // after the previous utterance and must be started again for barge-in/next turn.
+            if (listening_mode_ == kListeningModeRealtime || play_popup_on_listening_ ||
+                !audio_service_.IsAudioProcessorRunning()) {
                 // For auto mode, wait for the playback queue to drain before enabling
                 // voice processing. This prevents audio truncation when STOP arrives
                 // late due to network jitter. Instead of blocking the main loop here,
@@ -1077,8 +1085,11 @@ void Application::StartListeningAudio() {
     // Runs in the main loop, either directly from HandleStateChangedEvent or
     // deferred via MAIN_EVENT_PLAYBACK_DRAINED once the playback queue drains.
     if (GetDeviceState() != kDeviceStateListening) {
+        ESP_LOGW(TAG, "StartListeningAudio ignored, current state=%d", GetDeviceState());
         return;
     }
+
+    ESP_LOGI(TAG, "StartListeningAudio: mode=%d", listening_mode_);
 
     // Send the start listening command
     protocol_->SendStartListening(listening_mode_);
