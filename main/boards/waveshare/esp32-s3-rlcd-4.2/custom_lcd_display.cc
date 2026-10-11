@@ -1,3 +1,4 @@
+#include <ctime>
 #include <vector>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
@@ -6,11 +7,16 @@
 #include <esp_err.h>
 #include "custom_lcd_display.h"
 #include "lcd_display.h"
+#include "lvgl_theme.h"
 #include "esp_lvgl_port.h"
+#include "material_symbols.h"
 #include "assets/lang_config.h"
 #include "settings.h"
 #include "config.h"
 #include "board.h"
+
+LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
+LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 
 void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
 {
@@ -336,4 +342,429 @@ void CustomLcdDisplay::RLCD_Display() {
   	RLCD_SendCommand(0x2c);     // Page Address Set
 
 	RLCD_Sendbuffera(DispBuffer,DisplayLen);
+}
+
+lv_obj_t* CustomLcdDisplay::CreateDashboardCard(lv_obj_t* parent, const char* title) {
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    const lv_font_t* title_font = lvgl_theme != nullptr ? lvgl_theme->text_font()->font()
+                                                         : &BUILTIN_TEXT_FONT;
+    lv_obj_t* card = lv_obj_create(parent);
+    lv_obj_set_size(card, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(card, lv_color_white(), 0);
+    lv_obj_set_style_radius(card, 0, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_black(), 0);
+    lv_obj_set_style_pad_all(card, 2, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_style_text_font(title_label, title_font, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_white(), 0);
+    lv_obj_set_style_text_align(title_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_color(title_label, lv_color_black(), 0);
+    lv_obj_set_style_radius(title_label, 0, 0);
+    lv_obj_set_style_pad_hor(title_label, 6, 0);
+    lv_obj_set_style_pad_ver(title_label, 0, 0);
+
+    return card;
+}
+
+lv_obj_t* CustomLcdDisplay::CreateCardLabel(lv_obj_t* parent, const char* text) {
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    const lv_font_t* text_font =
+        lvgl_theme != nullptr ? lvgl_theme->text_font()->font() : &BUILTIN_TEXT_FONT;
+    lv_obj_t* label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, text_font, 0);
+    lv_obj_set_style_text_color(label, lv_color_black(), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_height(label, LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_ver(label, 1, 0);
+    return label;
+}
+
+void CustomLcdDisplay::SetupUI() {
+    if (setup_ui_called_) {
+        ESP_LOGW(TAG, "SetupUI() called multiple times, skipping duplicate call");
+        return;
+    }
+
+    Display::SetupUI();
+    DisplayLockGuard lock(this);
+
+    auto* screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    const lv_font_t* text_font =
+        lvgl_theme != nullptr ? lvgl_theme->text_font()->font() : &BUILTIN_TEXT_FONT;
+    const lv_font_t* icon_font =
+        lvgl_theme != nullptr ? lvgl_theme->icon_font()->font() : &BUILTIN_ICON_FONT;
+    const lv_font_t* large_icon_font =
+        lvgl_theme != nullptr && lvgl_theme->large_icon_font() != nullptr
+            ? lvgl_theme->large_icon_font()->font()
+            : icon_font;
+    const lv_font_t* status_icon_font =
+        text_font != nullptr && text_font->line_height >= 40 ? large_icon_font : icon_font;
+
+    dashboard_root_ = lv_obj_create(screen);
+    lv_obj_set_size(dashboard_root_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_remove_flag(dashboard_root_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(dashboard_root_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(dashboard_root_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dashboard_root_, 0, 0);
+    lv_obj_set_style_radius(dashboard_root_, 0, 0);
+    lv_obj_set_style_pad_all(dashboard_root_, 0, 0);
+    lv_obj_set_style_layout(dashboard_root_, LV_LAYOUT_NONE, 0);
+
+    // Top status strip: WiFi, mute, battery and board state.
+    top_bar_ = lv_obj_create(dashboard_root_);
+    lv_obj_set_size(top_bar_, LV_HOR_RES - 16, 28);
+    lv_obj_set_pos(top_bar_, 8, 8);
+    lv_obj_set_style_bg_color(top_bar_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(top_bar_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(top_bar_, 0, 0);
+    lv_obj_set_style_radius(top_bar_, 0, 0);
+    lv_obj_set_style_pad_hor(top_bar_, 8, 0);
+    lv_obj_set_style_pad_ver(top_bar_, 2, 0);
+    lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    network_label_ = lv_label_create(top_bar_);
+    lv_label_set_text(network_label_, "");
+    lv_obj_set_style_text_font(network_label_, status_icon_font, 0);
+    lv_obj_set_style_text_color(network_label_, lv_color_black(), 0);
+
+    lv_obj_t* right_icons = lv_obj_create(top_bar_);
+    lv_obj_set_size(right_icons, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(right_icons, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(right_icons, 0, 0);
+    lv_obj_set_style_radius(right_icons, 0, 0);
+    lv_obj_set_style_pad_all(right_icons, 0, 0);
+    lv_obj_set_flex_flow(right_icons, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(right_icons, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    mute_label_ = lv_label_create(right_icons);
+    lv_label_set_text(mute_label_, "");
+    lv_obj_set_style_text_font(mute_label_, status_icon_font, 0);
+    lv_obj_set_style_text_color(mute_label_, lv_color_black(), 0);
+
+    battery_label_ = lv_label_create(right_icons);
+    lv_label_set_text(battery_label_, "");
+    lv_obj_set_style_text_font(battery_label_, status_icon_font, 0);
+    lv_obj_set_style_text_color(battery_label_, lv_color_black(), 0);
+    lv_obj_set_style_margin_left(battery_label_, 6, 0);
+
+    // Secondary status line used for notifications / status text.
+    status_bar_ = lv_obj_create(dashboard_root_);
+    lv_obj_set_size(status_bar_, LV_HOR_RES - 16, 22);
+    lv_obj_set_pos(status_bar_, 8, 40);
+    lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(status_bar_, 0, 0);
+    lv_obj_set_style_radius(status_bar_, 0, 0);
+    lv_obj_set_style_pad_all(status_bar_, 0, 0);
+    lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
+
+    notification_label_ = lv_label_create(status_bar_);
+    lv_obj_set_width(notification_label_, LV_HOR_RES - 16);
+    lv_label_set_long_mode(notification_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(notification_label_, text_font, 0);
+    lv_obj_set_style_text_color(notification_label_, lv_color_black(), 0);
+    lv_label_set_text(notification_label_, "");
+    lv_obj_align(notification_label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+
+    status_label_ = lv_label_create(status_bar_);
+    lv_obj_set_width(status_label_, LV_HOR_RES - 16);
+    lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(status_label_, text_font, 0);
+    lv_obj_set_style_text_color(status_label_, lv_color_black(), 0);
+    lv_label_set_text(status_label_, "Ready");
+    lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
+
+    // Left panel: clock / date / agenda / tool status.
+    lv_obj_t* left_panel = lv_obj_create(dashboard_root_);
+    lv_obj_set_size(left_panel, 188, LV_VER_RES - 70);
+    lv_obj_set_pos(left_panel, 8, 66);
+    lv_obj_set_style_bg_color(left_panel, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(left_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(left_panel, 2, 0);
+    lv_obj_set_style_border_color(left_panel, lv_color_black(), 0);
+    lv_obj_set_style_radius(left_panel, 0, 0);
+    lv_obj_set_style_pad_all(left_panel, 8, 0);
+    lv_obj_set_style_layout(left_panel, LV_LAYOUT_NONE, 0);
+
+    clock_time_label_ = lv_label_create(left_panel);
+    lv_obj_set_width(clock_time_label_, 156);
+    lv_obj_set_height(clock_time_label_, 40);
+    lv_obj_align(clock_time_label_, LV_ALIGN_TOP_MID, 0, 14);
+    lv_label_set_long_mode(clock_time_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(clock_time_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(clock_time_label_, text_font, 0);
+    lv_obj_set_style_text_color(clock_time_label_, lv_color_black(), 0);
+    lv_label_set_text(clock_time_label_, "--:--");
+
+    clock_date_label_ = lv_label_create(left_panel);
+    lv_obj_set_width(clock_date_label_, 156);
+    lv_obj_set_height(clock_date_label_, 22);
+    lv_obj_align(clock_date_label_, LV_ALIGN_TOP_MID, 0, 56);
+    lv_label_set_long_mode(clock_date_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(clock_date_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(clock_date_label_, text_font, 0);
+    lv_obj_set_style_text_color(clock_date_label_, lv_color_black(), 0);
+    lv_label_set_text(clock_date_label_, "----/--/--");
+
+    agenda_card_ = CreateDashboardCard(left_panel, "Agenda");
+    lv_obj_set_size(agenda_card_, 148, 58);
+    lv_obj_align(agenda_card_, LV_ALIGN_TOP_MID, 0, 84);
+    agenda_label_ = CreateCardLabel(agenda_card_, "No agenda");
+
+    tool_card_ = CreateDashboardCard(left_panel, "Tools");
+    lv_obj_set_size(tool_card_, 148, 58);
+    lv_obj_align(tool_card_, LV_ALIGN_TOP_MID, 0, 148);
+    tool_status_label_ = CreateCardLabel(tool_card_, "Idle");
+
+    // Right panel: Q-style avatar on top, dialogue strip at bottom.
+    lv_obj_t* right_panel = lv_obj_create(dashboard_root_);
+    lv_obj_set_size(right_panel, 188, LV_VER_RES - 70);
+    lv_obj_set_pos(right_panel, 204, 66);
+    lv_obj_set_style_bg_color(right_panel, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(right_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(right_panel, 2, 0);
+    lv_obj_set_style_border_color(right_panel, lv_color_black(), 0);
+    lv_obj_set_style_radius(right_panel, 0, 0);
+    lv_obj_set_style_pad_all(right_panel, 8, 0);
+    lv_obj_set_style_layout(right_panel, LV_LAYOUT_NONE, 0);
+
+    lv_obj_t* avatar_box = lv_obj_create(right_panel);
+    lv_obj_set_size(avatar_box, 164, 156);
+    lv_obj_align(avatar_box, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_style_bg_color(avatar_box, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(avatar_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(avatar_box, 1, 0);
+    lv_obj_set_style_border_color(avatar_box, lv_color_black(), 0);
+    lv_obj_set_style_radius(avatar_box, 0, 0);
+
+    avatar_label_ = lv_label_create(avatar_box);
+    lv_obj_set_width(avatar_label_, 156);
+    lv_label_set_long_mode(avatar_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(avatar_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(avatar_label_, large_icon_font, 0);
+    lv_obj_set_style_text_color(avatar_label_, lv_color_black(), 0);
+    lv_label_set_text(avatar_label_, MATERIAL_SYMBOLS_ROBOT_2);
+    lv_obj_center(avatar_label_);
+
+    lv_obj_t* dialogue_box = lv_obj_create(right_panel);
+    lv_obj_set_size(dialogue_box, 164, 52);
+    lv_obj_align(dialogue_box, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_style_bg_color(dialogue_box, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(dialogue_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(dialogue_box, 1, 0);
+    lv_obj_set_style_border_color(dialogue_box, lv_color_black(), 0);
+    lv_obj_set_style_radius(dialogue_box, 0, 0);
+    lv_obj_set_style_pad_all(dialogue_box, 6, 0);
+    lv_obj_set_style_layout(dialogue_box, LV_LAYOUT_NONE, 0);
+
+    dashboard_message_label_ = lv_label_create(dialogue_box);
+    lv_obj_set_width(dashboard_message_label_, 148);
+    lv_obj_set_height(dashboard_message_label_, 40);
+    lv_label_set_long_mode(dashboard_message_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dashboard_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(dashboard_message_label_, text_font, 0);
+    lv_obj_set_style_text_color(dashboard_message_label_, lv_color_black(), 0);
+    lv_label_set_text(dashboard_message_label_, "");
+    lv_obj_center(dashboard_message_label_);
+}
+
+void CustomLcdDisplay::SetStatus(const char* status) {
+    LvglDisplay::SetStatus(status);
+
+    if (!setup_ui_called_) {
+        return;
+    }
+
+    time_t now = time(nullptr);
+    struct tm tm_now = {};
+    if (localtime_r(&now, &tm_now) == nullptr || tm_now.tm_year < 2025 - 1900) {
+        return;
+    }
+
+    char time_text[8];
+    char date_text[16];
+    strftime(time_text, sizeof(time_text), "%H:%M", &tm_now);
+    strftime(date_text, sizeof(date_text), "%Y-%m-%d", &tm_now);
+
+    DisplayLockGuard lock(this);
+    if (clock_time_label_ != nullptr) {
+        lv_label_set_text(clock_time_label_, time_text);
+    }
+    if (clock_date_label_ != nullptr) {
+        lv_label_set_text(clock_date_label_, date_text);
+    }
+}
+
+void CustomLcdDisplay::SetEmotion(const char* emotion) {
+    (void)emotion;
+}
+
+void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
+    (void)role;
+    if (dashboard_message_label_ == nullptr || content == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    lv_label_set_text(dashboard_message_label_, content);
+}
+
+void CustomLcdDisplay::ClearChatMessages() {
+    if (dashboard_message_label_ == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    lv_label_set_text(dashboard_message_label_, "");
+}
+
+void CustomLcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
+    (void)image;
+}
+
+void CustomLcdDisplay::SetDashboardClock(const char* time_text, const char* date_text) {
+    DisplayLockGuard lock(this);
+    if (clock_time_label_ != nullptr && time_text != nullptr) {
+        lv_label_set_text(clock_time_label_, time_text);
+    }
+    if (clock_date_label_ != nullptr && date_text != nullptr) {
+        lv_label_set_text(clock_date_label_, date_text);
+    }
+}
+
+void CustomLcdDisplay::SetDashboardAgenda(const char* text) {
+    if (agenda_label_ == nullptr || text == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    lv_label_set_text(agenda_label_, text);
+}
+
+void CustomLcdDisplay::SetDashboardToolStatus(const char* text) {
+    if (tool_status_label_ == nullptr || text == nullptr) {
+        return;
+    }
+    DisplayLockGuard lock(this);
+    lv_label_set_text(tool_status_label_, text);
+}
+
+void CustomLcdDisplay::SetDashboardDrawing(const uint8_t* bitmap, int width, int height) {
+    (void)bitmap;
+    (void)width;
+    (void)height;
+}
+
+void CustomLcdDisplay::SetDashboardMessage(const char* text) {
+    SetChatMessage("system", text);
+}
+
+namespace {
+void UpdateCardFonts(lv_obj_t* root, const lv_font_t* font) {
+    if (root == nullptr || font == nullptr) {
+        return;
+    }
+
+    uint32_t child_count = lv_obj_get_child_cnt(root);
+    for (uint32_t i = 0; i < child_count; i++) {
+        lv_obj_t* child = lv_obj_get_child(root, i);
+        if (child == nullptr) {
+            continue;
+        }
+
+        if (lv_obj_get_class(child) == &lv_label_class) {
+            lv_obj_set_style_text_font(child, font, 0);
+        }
+
+        UpdateCardFonts(child, font);
+    }
+}
+}  // namespace
+
+void CustomLcdDisplay::SetTheme(Theme* theme) {
+    if (theme == nullptr) {
+        return;
+    }
+
+    Display::SetTheme(theme);
+    if (!setup_ui_called_) {
+        return;
+    }
+
+    DisplayLockGuard lock(this);
+    auto* lvgl_theme = static_cast<LvglTheme*>(theme);
+    if (lvgl_theme == nullptr || lvgl_theme->text_font() == nullptr ||
+        lvgl_theme->icon_font() == nullptr) {
+        return;
+    }
+
+    const lv_font_t* text_font = lvgl_theme->text_font()->font();
+    const lv_font_t* icon_font = lvgl_theme->icon_font()->font();
+    const lv_font_t* avatar_font = icon_font;
+    if (lvgl_theme->large_icon_font() != nullptr && lvgl_theme->large_icon_font()->font() != nullptr) {
+        avatar_font = lvgl_theme->large_icon_font()->font();
+    }
+    const lv_font_t* status_icon_font = icon_font;
+    if (lvgl_theme->large_icon_font() != nullptr && lvgl_theme->large_icon_font()->font() != nullptr &&
+        text_font != nullptr && text_font->line_height >= 40) {
+        status_icon_font = lvgl_theme->large_icon_font()->font();
+    }
+    if (text_font == nullptr) {
+        text_font = &BUILTIN_TEXT_FONT;
+    }
+    if (status_icon_font == nullptr) {
+        status_icon_font = icon_font != nullptr ? icon_font : &BUILTIN_ICON_FONT;
+    }
+
+    auto* screen = lv_screen_active();
+    if (screen != nullptr) {
+        lv_obj_set_style_text_font(screen, text_font, 0);
+        lv_obj_set_style_text_color(screen, lvgl_theme->text_color(), 0);
+    }
+    if (dashboard_root_ != nullptr) {
+        lv_obj_set_style_text_font(dashboard_root_, text_font, 0);
+        lv_obj_set_style_text_color(dashboard_root_, lvgl_theme->text_color(), 0);
+        UpdateCardFonts(dashboard_root_, text_font);
+    }
+    if (network_label_ != nullptr) {
+        lv_obj_set_style_text_font(network_label_, status_icon_font, 0);
+        lv_obj_set_style_text_color(network_label_, lv_color_black(), 0);
+    }
+    if (mute_label_ != nullptr) {
+        lv_obj_set_style_text_font(mute_label_, status_icon_font, 0);
+        lv_obj_set_style_text_color(mute_label_, lv_color_black(), 0);
+    }
+    if (battery_label_ != nullptr) {
+        lv_obj_set_style_text_font(battery_label_, status_icon_font, 0);
+        lv_obj_set_style_text_color(battery_label_, lv_color_black(), 0);
+    }
+    if (status_label_ != nullptr) {
+        lv_obj_set_style_text_font(status_label_, text_font, 0);
+        lv_obj_set_style_text_color(status_label_, lv_color_black(), 0);
+    }
+    if (notification_label_ != nullptr) {
+        lv_obj_set_style_text_font(notification_label_, text_font, 0);
+        lv_obj_set_style_text_color(notification_label_, lv_color_black(), 0);
+    }
+    if (dashboard_message_label_ != nullptr) {
+        lv_obj_set_style_text_font(dashboard_message_label_, text_font, 0);
+        lv_obj_set_style_text_color(dashboard_message_label_, lv_color_black(), 0);
+    }
+    if (avatar_label_ != nullptr) {
+        lv_obj_set_style_text_font(avatar_label_, avatar_font, 0);
+        lv_obj_set_style_text_color(avatar_label_, lv_color_black(), 0);
+    }
 }

@@ -288,10 +288,27 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
     if (cJSON_IsString(font)) {
         std::string fonts_text_file = font->valuestring;
         if (assets->GetAssetData(fonts_text_file, ptr, size)) {
-            auto text_font = std::make_shared<LvglCBinFont>(ptr);
             auto display = Board::GetInstance().GetDisplay();
-            if (text_font->font() == nullptr || display == nullptr ||
-                !display->SetTextFont(text_font)) {
+            bool text_font_applied = false;
+            uint8_t text_font_bpp = 0;
+
+            // LVGL is configured with LV_OS_NONE, so its allocator is not
+            // internally synchronized. Assets::Apply() runs in the activation
+            // task while the LVGL port task may be rendering concurrently.
+            // Parse/copy the font and rebind the styles while holding the
+            // display lock to prevent concurrent access to the LVGL TLSF heap.
+            if (display != nullptr) {
+                DisplayLockGuard lock(display);
+                if (lock) {
+                    auto text_font = std::make_shared<LvglCBinFont>(ptr);
+                    if (text_font->font() != nullptr && display->SetTextFont(text_font)) {
+                        text_font_bpp = text_font->bpp();
+                        text_font_applied = true;
+                    }
+                }
+            }
+
+            if (!text_font_applied) {
                 ESP_LOGW(TAG, "Ignoring invalid text font asset %s", fonts_text_file.c_str());
             } else {
                 assets->DisableTextFontGlyphPush();
@@ -309,7 +326,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
                     font_size->valuedouble == font_size->valueint && cJSON_IsNumber(font_bpp) &&
                     font_bpp->valuedouble == font_bpp->valueint &&
                     (font_bpp->valueint == 1 || font_bpp->valueint == 4) &&
-                    font_bpp->valueint == text_font->bpp() && cJSON_IsString(bundle) &&
+                    font_bpp->valueint == text_font_bpp && cJSON_IsString(bundle) &&
                     bundle->valuestring[0] != '\0' && std::strlen(bundle->valuestring) <= 64;
                 if (supports_glyph_push) {
                     assets->text_font_capability_ = {
