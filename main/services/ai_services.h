@@ -19,10 +19,10 @@ struct ThirdPartyAiConfig {
     std::string llm_api_key_header = "x-bf-vk";
     std::string llm_api_key_prefix;
     std::string asr_model = "qwen3-asr-flash";
-    std::string tts_model = "qwen-tts";
+    std::string tts_model = "qwen3-tts-flash";
     std::string tts_voice = "Cherry";
     std::string llm_base_url = "https://vibeg.seer-robotics.cn/openai/v1";
-    std::string llm_model = "claude-fable-5-1";
+    std::string llm_model = "deepseek-flash";
     std::string dashscope_base_url = "https://maas.qianwenaiapi.com/api/v1";
 };
 

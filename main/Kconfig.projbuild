@@ -1180,7 +1180,7 @@ config XIAOZHI_THIRD_PARTY_ASR_MODEL
 
 config XIAOZHI_THIRD_PARTY_TTS_MODEL
     string "TTS model"
-    default "qwen-tts"
+    default "qwen3-tts-flash"
     depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
 
 config XIAOZHI_THIRD_PARTY_TTS_VOICE
@@ -1195,7 +1195,7 @@ config XIAOZHI_THIRD_PARTY_LLM_BASE_URL
 
 config XIAOZHI_THIRD_PARTY_LLM_MODEL
     string "LLM model"
-    default "claude-fable-5-1"
+    default "deepseek-flash"
     depends on XIAOZHI_ENABLE_THIRD_PARTY_AI
 
 config XIAOZHI_THIRD_PARTY_DASHSCOPE_BASE_URL

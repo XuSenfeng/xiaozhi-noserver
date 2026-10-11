@@ -377,6 +377,7 @@ std::vector<std::string> SplitReplyForTts(const std::string& text) {
     // large WAV. A whole multi-sentence reply can easily become a 1+ MB WAV and exhaust
     // the ESP32-S3 heap while downloading and converting it to PCM.
     constexpr size_t kMaxTtsBytes = 60;
+    constexpr size_t kMinTtsBytes = 30;  // About 10 Chinese characters.
     static const char* kPunctuation[] = {
         "\u3002",  // 。
         "\uff01",  // ！
@@ -392,13 +393,15 @@ std::vector<std::string> SplitReplyForTts(const std::string& text) {
     std::vector<std::string> chunks;
     std::string chunk;
 
-    auto push_chunk = [&]() {
-        if (chunk.empty()) {
-            return;
-        }
+    auto push_chunk = [&](bool force) {
         std::string candidate = TrimAsciiWhitespace(chunk);
         if (candidate.empty() || !HasReadableText(candidate)) {
             chunk.clear();
+            return;
+        }
+        // Prefer to accumulate until we have roughly 10 Chinese characters (30 UTF-8
+        // bytes). This avoids submitting very short TTS requests that sound choppy.
+        if (!force && candidate.size() < kMinTtsBytes) {
             return;
         }
         chunks.push_back(std::move(candidate));
@@ -420,7 +423,7 @@ std::vector<std::string> SplitReplyForTts(const std::string& text) {
         if (matched_boundary) {
             chunk.append(text, i, boundary_len);
             i += boundary_len;
-            push_chunk();
+            push_chunk(false);
             continue;
         }
 
@@ -434,13 +437,13 @@ std::vector<std::string> SplitReplyForTts(const std::string& text) {
         }
 
         if (chunk.size() >= kMaxTtsBytes) {
-            push_chunk();
+            push_chunk(true);
         }
         chunk.push_back(static_cast<char>(byte));
         ++i;
     }
 
-    push_chunk();
+    push_chunk(true);
     return chunks;
 }
 
@@ -895,17 +898,24 @@ void ThirdPartyProtocol::ProcessConversation() {
 
     EmitJson("tts", "state", "start");
     auto& audio = Application::GetInstance().GetAudioService();
-    for (const auto& chunk : tts_chunks) {
+
+    auto next_speech = tts_->Synthesize(tts_chunks.front());
+    if (!next_speech || !next_speech->ok || next_speech->pcm.empty()) {
+        ESP_LOGE(TAG, "Third-party TTS failed: %s",
+                 next_speech ? next_speech->error_message.c_str() : "no result");
+        AbortCurrentWork(true);
+        return;
+    }
+
+    for (size_t i = 0; i < tts_chunks.size(); ++i) {
         if (abort_requested_.load()) {
             return;
         }
 
-        if (chunk.empty() || chunk.find_first_not_of(" \t\r\n") == std::string::npos) {
-            ESP_LOGW(TAG, "Skipping empty TTS chunk");
-            continue;
-        }
+        const std::string& chunk = tts_chunks[i];
+        auto speech = std::move(next_speech);
+        next_speech.reset();
 
-        auto speech = tts_->Synthesize(chunk);
         if (!speech || !speech->ok || speech->pcm.empty()) {
             ESP_LOGE(TAG, "Third-party TTS failed: %s",
                      speech ? speech->error_message.c_str() : "no result");
@@ -925,12 +935,25 @@ void ThirdPartyProtocol::ProcessConversation() {
         // Release the empty segment object before requesting the next segment.
         speech.reset();
 
-        // Do not start the next DashScope/TLS request while previous PCM chunks are still
-        // queued or playing. The ESP32-S3 can otherwise end up holding one downloaded WAV,
-        // one decoded PCM result, and up to MAX_PLAYBACK_TASKS_IN_QUEUE PCM copies at the
-        // same time, which frequently exhausts heap during mbedTLS allocation.
-        while (!audio.IsPlaybackIdle() && !abort_requested_.load()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+        // Synthesize the next sentence while the current PCM is still queued or playing.
+        // This keeps the next audio segment ready before playback drains and reduces the
+        // pause between consecutive TTS chunks.
+        if (i + 1 < tts_chunks.size()) {
+            next_speech = tts_->Synthesize(tts_chunks[i + 1]);
+            if (!next_speech || !next_speech->ok || next_speech->pcm.empty()) {
+                ESP_LOGE(TAG, "Third-party TTS failed: %s",
+                         next_speech ? next_speech->error_message.c_str() : "no result");
+                AbortCurrentWork(true);
+                return;
+            }
+        }
+
+        if (i + 1 < tts_chunks.size()) {
+            // Do not queue the next PCM chunk until the previous one has drained. We already
+            // synthesized it above, so the next request does not add a download/decode gap.
+            while (!audio.IsPlaybackIdle() && !abort_requested_.load()) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
         }
     }
 
@@ -940,6 +963,7 @@ void ThirdPartyProtocol::ProcessConversation() {
     while (!audio.IsPlaybackIdle() && !abort_requested_.load()) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+
     EmitJson("tts", "state", "stop");
 }
 
