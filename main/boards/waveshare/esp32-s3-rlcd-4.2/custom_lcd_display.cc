@@ -1,6 +1,7 @@
 #include <ctime>
 #include <vector>
 #include <cstring>
+#include <cctype>
 #include <freertos/FreeRTOS.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_log.h>
@@ -17,6 +18,7 @@
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
+LV_IMAGE_DECLARE(oip_avatar_image);
 
 void CustomLcdDisplay::Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p)
 {
@@ -352,7 +354,7 @@ lv_obj_t* CustomLcdDisplay::CreateDashboardCard(lv_obj_t* parent, const char* ti
     lv_obj_set_size(card, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(card, lv_color_white(), 0);
     lv_obj_set_style_radius(card, 0, 0);
-    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
     lv_obj_set_style_border_color(card, lv_color_black(), 0);
     lv_obj_set_style_pad_all(card, 2, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
@@ -421,15 +423,22 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_set_style_pad_all(dashboard_root_, 0, 0);
     lv_obj_set_style_layout(dashboard_root_, LV_LAYOUT_NONE, 0);
 
-    // Top status strip: WiFi, mute, battery and board state.
+    // Keep only the compact hardware status row at the top. The legacy XiaoZhi
+    // status text row is retained internally for LvglDisplay compatibility but
+    // is hidden because the dashboard has dedicated status modules.
+    const int kContentTop = 28;
+    const int kContentHeight = LV_VER_RES - kContentTop;
+    const int kLeftWidth = 164;
+    const int kRightWidth = LV_HOR_RES - kLeftWidth;
+
     top_bar_ = lv_obj_create(dashboard_root_);
-    lv_obj_set_size(top_bar_, LV_HOR_RES - 16, 28);
-    lv_obj_set_pos(top_bar_, 8, 8);
+    lv_obj_set_size(top_bar_, LV_HOR_RES, 28);
+    lv_obj_set_pos(top_bar_, 0, 0);
     lv_obj_set_style_bg_color(top_bar_, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(top_bar_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(top_bar_, 0, 0);
     lv_obj_set_style_radius(top_bar_, 0, 0);
-    lv_obj_set_style_pad_hor(top_bar_, 8, 0);
+    lv_obj_set_style_pad_hor(top_bar_, 6, 0);
     lv_obj_set_style_pad_ver(top_bar_, 2, 0);
     lv_obj_set_flex_flow(top_bar_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
@@ -461,18 +470,18 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_set_style_text_color(battery_label_, lv_color_black(), 0);
     lv_obj_set_style_margin_left(battery_label_, 6, 0);
 
-    // Secondary status line used for notifications / status text.
     status_bar_ = lv_obj_create(dashboard_root_);
-    lv_obj_set_size(status_bar_, LV_HOR_RES - 16, 22);
-    lv_obj_set_pos(status_bar_, 8, 40);
-    lv_obj_set_style_bg_opa(status_bar_, LV_OPA_TRANSP, 0);
+    lv_obj_set_size(status_bar_, LV_HOR_RES, 24);
+    lv_obj_set_pos(status_bar_, 0, 28);
+    lv_obj_set_style_bg_color(status_bar_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(status_bar_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(status_bar_, 0, 0);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_pad_all(status_bar_, 0, 0);
     lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
 
     notification_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(notification_label_, LV_HOR_RES - 16);
+    lv_obj_set_width(notification_label_, LV_HOR_RES);
     lv_label_set_long_mode(notification_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(notification_label_, text_font, 0);
@@ -482,30 +491,31 @@ void CustomLcdDisplay::SetupUI() {
     lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
 
     status_label_ = lv_label_create(status_bar_);
-    lv_obj_set_width(status_label_, LV_HOR_RES - 16);
+    lv_obj_set_width(status_label_, LV_HOR_RES);
     lv_label_set_long_mode(status_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_set_style_text_align(status_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(status_label_, text_font, 0);
     lv_obj_set_style_text_color(status_label_, lv_color_black(), 0);
     lv_label_set_text(status_label_, "Ready");
     lv_obj_align(status_label_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(status_bar_, LV_OBJ_FLAG_HIDDEN);
 
-    // Left panel: clock / date / agenda / tool status.
+    // Left modules: clock/date followed by agenda and tool status, with no gutters.
     lv_obj_t* left_panel = lv_obj_create(dashboard_root_);
-    lv_obj_set_size(left_panel, 188, LV_VER_RES - 70);
-    lv_obj_set_pos(left_panel, 8, 66);
+    lv_obj_set_size(left_panel, kLeftWidth, kContentHeight);
+    lv_obj_set_pos(left_panel, 0, kContentTop);
     lv_obj_set_style_bg_color(left_panel, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(left_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(left_panel, 2, 0);
+    lv_obj_set_style_border_width(left_panel, 0, 0);
     lv_obj_set_style_border_color(left_panel, lv_color_black(), 0);
     lv_obj_set_style_radius(left_panel, 0, 0);
-    lv_obj_set_style_pad_all(left_panel, 8, 0);
+    lv_obj_set_style_pad_all(left_panel, 0, 0);
     lv_obj_set_style_layout(left_panel, LV_LAYOUT_NONE, 0);
 
     clock_time_label_ = lv_label_create(left_panel);
-    lv_obj_set_width(clock_time_label_, 156);
-    lv_obj_set_height(clock_time_label_, 40);
-    lv_obj_align(clock_time_label_, LV_ALIGN_TOP_MID, 0, 14);
+    lv_obj_set_width(clock_time_label_, kLeftWidth);
+    lv_obj_set_height(clock_time_label_, 42);
+    lv_obj_align(clock_time_label_, LV_ALIGN_TOP_MID, 0, 6);
     lv_label_set_long_mode(clock_time_label_, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(clock_time_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(clock_time_label_, text_font, 0);
@@ -513,9 +523,9 @@ void CustomLcdDisplay::SetupUI() {
     lv_label_set_text(clock_time_label_, "--:--");
 
     clock_date_label_ = lv_label_create(left_panel);
-    lv_obj_set_width(clock_date_label_, 156);
+    lv_obj_set_width(clock_date_label_, kLeftWidth);
     lv_obj_set_height(clock_date_label_, 22);
-    lv_obj_align(clock_date_label_, LV_ALIGN_TOP_MID, 0, 56);
+    lv_obj_align(clock_date_label_, LV_ALIGN_TOP_MID, 0, 48);
     lv_label_set_long_mode(clock_date_label_, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(clock_date_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(clock_date_label_, text_font, 0);
@@ -523,59 +533,69 @@ void CustomLcdDisplay::SetupUI() {
     lv_label_set_text(clock_date_label_, "----/--/--");
 
     agenda_card_ = CreateDashboardCard(left_panel, "Agenda");
-    lv_obj_set_size(agenda_card_, 148, 58);
-    lv_obj_align(agenda_card_, LV_ALIGN_TOP_MID, 0, 84);
+    lv_obj_set_size(agenda_card_, kLeftWidth, 76);
+    lv_obj_align(agenda_card_, LV_ALIGN_TOP_MID, 0, 76);
     agenda_label_ = CreateCardLabel(agenda_card_, "No agenda");
 
-    tool_card_ = CreateDashboardCard(left_panel, "Tools");
-    lv_obj_set_size(tool_card_, 148, 58);
-    lv_obj_align(tool_card_, LV_ALIGN_TOP_MID, 0, 148);
-    tool_status_label_ = CreateCardLabel(tool_card_, "Idle");
+    // Keep tool execution and device state separate. The former is transient,
+    // while the latter is always shown in the bottom-left module.
+    constexpr int kToolCardTop = 152;
+    constexpr int kToolCardHeight = 56;
+    constexpr int kDeviceStatusTop = kToolCardTop + kToolCardHeight;
+    const int kDeviceStatusHeight = kContentHeight - kDeviceStatusTop;
 
-    // Right panel: Q-style avatar on top, dialogue strip at bottom.
+    tool_card_ = CreateDashboardCard(left_panel, "Tools");
+    lv_obj_set_size(tool_card_, kLeftWidth, kToolCardHeight);
+    lv_obj_align(tool_card_, LV_ALIGN_TOP_MID, 0, kToolCardTop);
+    tool_status_label_ = CreateCardLabel(tool_card_, "No call");
+
+    device_status_card_ = CreateDashboardCard(left_panel, "Status");
+    lv_obj_set_size(device_status_card_, kLeftWidth, kDeviceStatusHeight);
+    lv_obj_align(device_status_card_, LV_ALIGN_TOP_MID, 0, kDeviceStatusTop);
+    device_status_label_ = CreateCardLabel(device_status_card_, "待命");
+
+    // Right panel: centered monochrome avatar and dialogue strip, flush together.
     lv_obj_t* right_panel = lv_obj_create(dashboard_root_);
-    lv_obj_set_size(right_panel, 188, LV_VER_RES - 70);
-    lv_obj_set_pos(right_panel, 204, 66);
+    lv_obj_set_size(right_panel, kRightWidth, kContentHeight);
+    lv_obj_set_pos(right_panel, kLeftWidth, kContentTop);
     lv_obj_set_style_bg_color(right_panel, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(right_panel, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(right_panel, 2, 0);
+    lv_obj_set_style_border_width(right_panel, 0, 0);
     lv_obj_set_style_border_color(right_panel, lv_color_black(), 0);
     lv_obj_set_style_radius(right_panel, 0, 0);
-    lv_obj_set_style_pad_all(right_panel, 8, 0);
+    lv_obj_set_style_pad_all(right_panel, 0, 0);
     lv_obj_set_style_layout(right_panel, LV_LAYOUT_NONE, 0);
 
+    constexpr int kDialogueHeight = 58;
+    const int avatar_height = kContentHeight - kDialogueHeight;
     lv_obj_t* avatar_box = lv_obj_create(right_panel);
-    lv_obj_set_size(avatar_box, 164, 156);
-    lv_obj_align(avatar_box, LV_ALIGN_TOP_MID, 0, 8);
+    lv_obj_set_size(avatar_box, kRightWidth, avatar_height);
+    lv_obj_align(avatar_box, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_color(avatar_box, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(avatar_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(avatar_box, 1, 0);
+    lv_obj_set_style_border_width(avatar_box, 0, 0);
     lv_obj_set_style_border_color(avatar_box, lv_color_black(), 0);
     lv_obj_set_style_radius(avatar_box, 0, 0);
+    lv_obj_set_style_pad_all(avatar_box, 0, 0);
 
-    avatar_label_ = lv_label_create(avatar_box);
-    lv_obj_set_width(avatar_label_, 156);
-    lv_label_set_long_mode(avatar_label_, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(avatar_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(avatar_label_, large_icon_font, 0);
-    lv_obj_set_style_text_color(avatar_label_, lv_color_black(), 0);
-    lv_label_set_text(avatar_label_, MATERIAL_SYMBOLS_ROBOT_2);
-    lv_obj_center(avatar_label_);
+    avatar_image_ = lv_image_create(avatar_box);
+    lv_image_set_src(avatar_image_, &oip_avatar_image);
+    lv_obj_center(avatar_image_);
 
     lv_obj_t* dialogue_box = lv_obj_create(right_panel);
-    lv_obj_set_size(dialogue_box, 164, 52);
-    lv_obj_align(dialogue_box, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_size(dialogue_box, kRightWidth, kDialogueHeight);
+    lv_obj_align(dialogue_box, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(dialogue_box, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(dialogue_box, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(dialogue_box, 1, 0);
+    lv_obj_set_style_border_width(dialogue_box, 0, 0);
     lv_obj_set_style_border_color(dialogue_box, lv_color_black(), 0);
     lv_obj_set_style_radius(dialogue_box, 0, 0);
-    lv_obj_set_style_pad_all(dialogue_box, 6, 0);
+    lv_obj_set_style_pad_all(dialogue_box, 4, 0);
     lv_obj_set_style_layout(dialogue_box, LV_LAYOUT_NONE, 0);
 
     dashboard_message_label_ = lv_label_create(dialogue_box);
-    lv_obj_set_width(dashboard_message_label_, 148);
-    lv_obj_set_height(dashboard_message_label_, 40);
+    lv_obj_set_width(dashboard_message_label_, kRightWidth - 12);
+    lv_obj_set_height(dashboard_message_label_, kDialogueHeight - 8);
     lv_label_set_long_mode(dashboard_message_label_, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_align(dashboard_message_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(dashboard_message_label_, text_font, 0);
@@ -585,6 +605,12 @@ void CustomLcdDisplay::SetupUI() {
 }
 
 void CustomLcdDisplay::SetStatus(const char* status) {
+    if (status == nullptr) {
+        return;
+    }
+
+    // Keep the common status update path for compatibility, while rendering
+    // the actual device state in the dashboard Status module below.
     LvglDisplay::SetStatus(status);
 
     if (!setup_ui_called_) {
@@ -602,6 +628,12 @@ void CustomLcdDisplay::SetStatus(const char* status) {
     strftime(time_text, sizeof(time_text), "%H:%M", &tm_now);
     strftime(date_text, sizeof(date_text), "%Y-%m-%d", &tm_now);
 
+    const bool is_clock_text = std::strlen(status) == 5 && status[2] == ':' &&
+                               std::isdigit(static_cast<unsigned char>(status[0])) &&
+                               std::isdigit(static_cast<unsigned char>(status[1])) &&
+                               std::isdigit(static_cast<unsigned char>(status[3])) &&
+                               std::isdigit(static_cast<unsigned char>(status[4]));
+
     DisplayLockGuard lock(this);
     if (clock_time_label_ != nullptr) {
         lv_label_set_text(clock_time_label_, time_text);
@@ -609,6 +641,12 @@ void CustomLcdDisplay::SetStatus(const char* status) {
     if (clock_date_label_ != nullptr) {
         lv_label_set_text(clock_date_label_, date_text);
     }
+    if (device_status_label_ != nullptr && !is_clock_text) {
+        lv_label_set_text(device_status_label_, status);
+    }
+    // LvglDisplay::UpdateStatusBar() calls SetStatus(time) on every idle
+    // minute. The legacy status row is hidden, so only the dashboard clock
+    // above is updated here.
 }
 
 void CustomLcdDisplay::SetEmotion(const char* emotion) {
@@ -652,6 +690,10 @@ void CustomLcdDisplay::SetDashboardAgenda(const char* text) {
     }
     DisplayLockGuard lock(this);
     lv_label_set_text(agenda_label_, text);
+}
+
+void CustomLcdDisplay::SetToolStatus(const char* status) {
+    SetDashboardToolStatus(status);
 }
 
 void CustomLcdDisplay::SetDashboardToolStatus(const char* text) {
@@ -713,10 +755,6 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
 
     const lv_font_t* text_font = lvgl_theme->text_font()->font();
     const lv_font_t* icon_font = lvgl_theme->icon_font()->font();
-    const lv_font_t* avatar_font = icon_font;
-    if (lvgl_theme->large_icon_font() != nullptr && lvgl_theme->large_icon_font()->font() != nullptr) {
-        avatar_font = lvgl_theme->large_icon_font()->font();
-    }
     const lv_font_t* status_icon_font = icon_font;
     if (lvgl_theme->large_icon_font() != nullptr && lvgl_theme->large_icon_font()->font() != nullptr &&
         text_font != nullptr && text_font->line_height >= 40) {
@@ -762,9 +800,5 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
     if (dashboard_message_label_ != nullptr) {
         lv_obj_set_style_text_font(dashboard_message_label_, text_font, 0);
         lv_obj_set_style_text_color(dashboard_message_label_, lv_color_black(), 0);
-    }
-    if (avatar_label_ != nullptr) {
-        lv_obj_set_style_text_font(avatar_label_, avatar_font, 0);
-        lv_obj_set_style_text_color(avatar_label_, lv_color_black(), 0);
     }
 }

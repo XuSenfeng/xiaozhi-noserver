@@ -54,8 +54,10 @@ private:
     lv_obj_t* drawing_placeholder_label_ = nullptr;
     lv_obj_t* tool_card_ = nullptr;
     lv_obj_t* tool_status_label_ = nullptr;
+    lv_obj_t* device_status_card_ = nullptr;
+    lv_obj_t* device_status_label_ = nullptr;
     lv_obj_t* dashboard_message_label_ = nullptr;
-    lv_obj_t* avatar_label_ = nullptr;
+    lv_obj_t* avatar_image_ = nullptr;
 
     lv_obj_t* CreateDashboardCard(lv_obj_t* parent, const char* title);
     lv_obj_t* CreateCardLabel(lv_obj_t* parent, const char* text);
@@ -63,6 +65,7 @@ private:
 public:
     virtual void SetupUI() override;
     virtual void SetStatus(const char* status) override;
+    virtual void SetToolStatus(const char* status) override;
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
     virtual void ClearChatMessages() override;

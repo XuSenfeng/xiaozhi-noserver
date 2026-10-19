@@ -439,11 +439,19 @@ std::expected<std::string, std::string> McpServer::CallAiTool(const std::string&
     auto& app = Application::GetInstance();
     auto promise = std::make_shared<std::promise<std::expected<std::string, std::string>>>();
     auto future = promise->get_future();
-    app.Schedule([tool, properties = std::move(*properties), promise]() {
+    app.Schedule([tool, tool_name, properties = std::move(*properties), promise]() {
+        auto display = Board::GetInstance().GetDisplay();
+        std::string running_status = "Running: " + tool_name;
+        display->SetToolStatus(running_status.c_str());
+
         auto result = tool->Call(properties);
         if (!result) {
+            std::string failed_status = "Failed: " + tool_name;
+            display->SetToolStatus(failed_status.c_str());
             promise->set_value(std::unexpected(std::move(result.error())));
         } else {
+            std::string done_status = "Done: " + tool_name;
+            display->SetToolStatus(done_status.c_str());
             promise->set_value(std::move(*result));
         }
     });
@@ -719,14 +727,22 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool, arguments = std::move(*properties),
+    app.Schedule([this, id, tool, tool_name, arguments = std::move(*properties),
                   response_sender = std::move(response_sender)]() {
+        auto display = Board::GetInstance().GetDisplay();
+        std::string running_status = "Running: " + tool_name;
+        display->SetToolStatus(running_status.c_str());
+
         auto result = tool->Call(arguments);
         if (!result) {
             ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
+            std::string failed_status = "Failed: " + tool_name;
+            display->SetToolStatus(failed_status.c_str());
             ReplyError(id, result.error(), response_sender);
             return;
         }
+        std::string done_status = "Done: " + tool_name;
+        display->SetToolStatus(done_status.c_str());
         ReplyResult(id, *result, response_sender);
     });
 }

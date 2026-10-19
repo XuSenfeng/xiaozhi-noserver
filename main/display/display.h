@@ -41,6 +41,8 @@ public:
     virtual ~Display();
 
     virtual void SetStatus(const char* status);
+    // Optional board-specific tool execution status.
+    virtual void SetToolStatus(const char* status) { (void)status; }
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string& notification, int duration_ms = 3000);
     virtual void SetEmotion(const char* emotion);
